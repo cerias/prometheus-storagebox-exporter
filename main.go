@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
+	"hash/fnv"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -37,6 +39,7 @@ type Storagebox struct {
 	Name                 string  `json:"name"`
 	Product              string  `json:"product"`
 	Cancelled            bool    `json:"cancelled"`
+	Location             string  `json:"location"`
 	Locked               bool    `json:"locked"`
 	LinkedServer         int     `json:"linked_server"`
 	PaidUntil            string  `json:"paid_until"`
@@ -51,13 +54,14 @@ type Storagebox struct {
 	ExternalReachability bool    `json:"external_reachability"`
 	Zfs                  bool    `json:"zfs"`
 	Server               string  `json:"server"`
+	HostSystem           string  `json:"host_system"`
 }
 
 var (
 	hetznerUsername string
 	hetznerPassword string
 	boxes           []Storagebox
-	labels          = []string{"id", "name", "product", "server"}
+	labels          = []string{"id", "name", "product", "server", "location", "host"}
 	diskQuota       = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "storagebox",
@@ -87,6 +91,22 @@ var (
 			Namespace: "storagebox",
 			Name:      "disk_usage_snapshots",
 			Help:      "Used diskspace by snapshots in MB",
+		},
+		labels,
+	)
+	locationRepresentation = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "storagebox",
+			Name:      "location_hash",
+			Help:      "Number representation of the location short name",
+		},
+		labels,
+	)
+	hostRepresentation = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "storagebox",
+			Name:      "host_system_hash",
+			Help:      "Number representation of the location short name",
 		},
 		labels,
 	)
@@ -120,6 +140,7 @@ func updateBoxes() {
 		log.Fatal(err)
 	}
 
+	boxes = boxes[:0]
 	for _, entry := range apiResponse {
 		req, err := http.NewRequest("GET", fmt.Sprintf("https://robot-ws.your-server.de/storagebox/%d", entry.Box.ID), nil)
 		req.SetBasicAuth(hetznerUsername, hetznerPassword)
@@ -153,61 +174,105 @@ func updateMetrics() {
 		updateBoxes()
 		for _, box := range boxes {
 			diskQuota.With(prometheus.Labels{
-				"id":      strconv.Itoa(box.ID),
-				"name":    box.Name,
-				"product": box.Product,
-				"server":  box.Server,
+				"id":       strconv.Itoa(box.ID),
+				"name":     box.Name,
+				"product":  box.Product,
+				"server":   box.Server,
+				"location": box.Location,
+				"host":     box.HostSystem,
 			}).Set(box.DiskQuota)
 
 			diskUsage.With(prometheus.Labels{
-				"id":      strconv.Itoa(box.ID),
-				"name":    box.Name,
-				"product": box.Product,
-				"server":  box.Server,
+				"id":       strconv.Itoa(box.ID),
+				"name":     box.Name,
+				"product":  box.Product,
+				"server":   box.Server,
+				"location": box.Location,
+				"host":     box.HostSystem,
 			}).Set(box.DiskUsage)
 
 			diskUsageData.With(prometheus.Labels{
-				"id":      strconv.Itoa(box.ID),
-				"name":    box.Name,
-				"product": box.Product,
-				"server":  box.Server,
+				"id":       strconv.Itoa(box.ID),
+				"name":     box.Name,
+				"product":  box.Product,
+				"server":   box.Server,
+				"location": box.Location,
+				"host":     box.HostSystem,
 			}).Set(box.DiskUsageData)
 
 			diskUsageSnapshots.With(prometheus.Labels{
-				"id":      strconv.Itoa(box.ID),
-				"name":    box.Name,
-				"product": box.Product,
-				"server":  box.Server,
+				"id":       strconv.Itoa(box.ID),
+				"name":     box.Name,
+				"product":  box.Product,
+				"server":   box.Server,
+				"location": box.Location,
+				"host":     box.HostSystem,
 			}).Set(box.DiskUsageSnapshots)
 
+			locationRepresentation.With(prometheus.Labels{
+				"id":       strconv.Itoa(box.ID),
+				"name":     box.Name,
+				"product":  box.Product,
+				"server":   box.Server,
+				"location": box.Location,
+				"host":     box.HostSystem,
+			}).Set(hash(box.Location))
+
+			hostRepresentation.With(prometheus.Labels{
+				"id":       strconv.Itoa(box.ID),
+				"name":     box.Name,
+				"product":  box.Product,
+				"server":   box.Server,
+				"location": box.Location,
+				"host":     box.HostSystem,
+			}).Set(hash(box.HostSystem))
 		}
 
 		// Try to avoid rate limiting
 		// Limit is 200req / 1h
-		time.Sleep(60 * time.Second)
+		// 200 requests / (box count + 2 to space out in case of restarts)
+		requestsPerBox := 200 / (len(boxes) + 5)
+		waitMinutes := 60 / requestsPerBox
+		// minimum wait time are 5 minutes
+		if waitMinutes < 5 {
+			waitMinutes = 5
+		}
+		waitTime := time.Duration(waitMinutes) * time.Minute
+		fmt.Println(fmt.Sprintf("Waiting for %s minutes to avoid ratelimting", waitTime))
+		time.Sleep(waitTime)
 	}
 }
 
-const (
-	listenAddr = ":9509"
-)
+func hash(s string) float64 {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	return float64(h.Sum32())
+}
+
+var listenAddr string
+var path string
 
 func main() {
+
 	hetznerUsername = os.Getenv("HETZNER_USER")
 	hetznerPassword = os.Getenv("HETZNER_PASS")
 
 	if hetznerUsername == "" || hetznerPassword == "" {
 		log.Fatal("Please provide HETZNER_USER and HETZNER_PASS as environment variables")
 	}
-
+	flag.StringVar(&listenAddr, "listen", ":9509", "exporter listen port ':9509' or 'localhost:9509'")
+	flag.StringVar(&path, "path", "/metrics", "exporter path default: '/metrics'")
+	flag.Parse()
 	prometheus.MustRegister(diskQuota)
 	prometheus.MustRegister(diskUsage)
 	prometheus.MustRegister(diskUsageData)
 	prometheus.MustRegister(diskUsageSnapshots)
+	prometheus.MustRegister(locationRepresentation)
+	prometheus.MustRegister(hostRepresentation)
 
 	go updateMetrics()
 
 	fmt.Printf("Listening on %q", listenAddr)
-	http.Handle("/metrics", promhttp.Handler())
+	http.Handle(path, promhttp.Handler())
 	http.ListenAndServe(listenAddr, nil)
 }

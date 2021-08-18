@@ -1,4 +1,4 @@
-module github.com/fleaz/prometheus-storagebox-exporter
+module github.com/cerias/prometheus-storagebox-exporter
 
 go 1.13
 

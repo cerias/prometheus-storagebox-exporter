@@ -140,7 +140,7 @@ func updateBoxes() {
 		log.Fatal(err)
 	}
 
-	boxes = boxes[:0]
+	boxes = nil
 	for _, entry := range apiResponse {
 		req, err := http.NewRequest("GET", fmt.Sprintf("https://robot-ws.your-server.de/storagebox/%d", entry.Box.ID), nil)
 		req.SetBasicAuth(hetznerUsername, hetznerPassword)
